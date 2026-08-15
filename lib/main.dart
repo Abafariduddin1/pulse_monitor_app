@@ -1,24 +1,25 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:fl_chart/fl_chart.dart';
 
 void main() {
-  runApp(const PulseApp());
+  runApp(const SecurePulseApp());
 }
 
-class PulseApp extends StatelessWidget {
-  const PulseApp({super.key});
+class SecurePulseApp extends StatelessWidget {
+  const SecurePulseApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      title: 'Secure Pulse Monitor',
       debugShowCheckedModeBanner: false,
-      title: 'Pulse Monitor',
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F172A),
-        colorScheme: const ColorScheme.dark(primary: Colors.redAccent),
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.redAccent,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
       ),
       home: const PulseHomePage(),
     );
@@ -33,289 +34,303 @@ class PulseHomePage extends StatefulWidget {
 }
 
 class _PulseHomePageState extends State<PulseHomePage> {
+  // BLE UUIDs matching the Arduino Sketch
+  final String serviceUuid = "19b10000-e8f2-537e-4f6c-d104768a1214";
+  final String hrCharUuid = "19b10001-e8f2-537e-4f6c-d104768a1214";
+  final String passCharUuid = "19b10002-e8f2-537e-4f6c-d104768a1214";
+
   BluetoothDevice? connectedDevice;
-  BluetoothCharacteristic? hrChar;
-  StreamSubscription? scanSub;
-  StreamSubscription? valueSub;
-  Timer? mockTimer;
+  BluetoothCharacteristic? passCharacteristic;
+  BluetoothCharacteristic? hrCharacteristic;
+  StreamSubscription<List<int>>? hrSubscription;
 
-  int currentBPM = 0;
+  List<ScanResult> scanResults = [];
   bool isScanning = false;
-  bool isConnected = false;
+  bool isAuthenticated = false;
+  int currentBpm = 0;
 
-  final List<FlSpot> bpmData = [];
-  double timeStep = 0;
+  final TextEditingController _pinController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-
-    if (kIsWeb) {
-      // Web Preview Mode (Microsoft Edge / Chrome)
-      startMockData();
-    } else {
-      // Mobile Platform (Android / iOS Hardware)
-      startScanning();
-    }
-  }
-
-  void startMockData() {
-    mockTimer?.cancel();
-    mockTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        setState(() {
-          timeStep += 1;
-          currentBPM = 72 + (timeStep % 6 == 0 ? 10 : -2).toInt();
-          bpmData.add(FlSpot(timeStep, currentBPM.toDouble()));
-          if (bpmData.length > 25) {
-            bpmData.removeAt(0);
-          }
-        });
-      }
-    });
-  }
-
-  void startScanning() async {
-    if (kIsWeb) return;
-
-    setState(() => isScanning = true);
-
-    try {
-      scanSub = FlutterBluePlus.scanResults.listen((results) async {
-        for (ScanResult r in results) {
-          if (r.device.platformName == "PulseMonitor") {
-            await FlutterBluePlus.stopScan();
-            connectToDevice(r.device);
-            break;
-          }
-        }
-      });
-
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
-    } catch (e) {
-      debugPrint("Scan error: $e");
-    } finally {
-      if (mounted) {
-        setState(() => isScanning = false);
-      }
-    }
-  }
-
-  // Safe wrapper function to prevent VS Code compiler errors on Web/Desktop
-  Future<void> _safeConnect(BluetoothDevice device) async {
-    // Calling the device connection dynamically avoids parameter errors in VS Code
-    dynamic dev = device;
-    await dev.connect();
-  }
-
-  void connectToDevice(BluetoothDevice device) async {
-    if (kIsWeb) return;
-
-    setState(() {
-      connectedDevice = device;
-    });
-
-    try {
-      // Use safe dynamic connection call
-      await _safeConnect(device);
-
-      if (mounted) {
-        setState(() {
-          isConnected = true;
-        });
-      }
-
-      List<BluetoothService> services = await device.discoverServices();
-      for (var service in services) {
-        if (service.uuid.toString().toUpperCase().contains("180D")) {
-          for (var c in service.characteristics) {
-            if (c.uuid.toString().toUpperCase().contains("2A37")) {
-              hrChar = c;
-              listenToPulse();
-              break;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("Bluetooth connection notice: $e");
-    }
-  }
-
-  void listenToPulse() async {
-    if (hrChar == null || kIsWeb) return;
-
-    try {
-      await hrChar!.setNotifyValue(true);
-      valueSub = hrChar!.lastValueStream.listen((value) {
-        if (value.length >= 2) {
-          int bpm = value[1];
-          if (bpm > 30 && bpm < 220 && mounted) {
-            setState(() {
-              currentBPM = bpm;
-              timeStep += 1;
-              bpmData.add(FlSpot(timeStep, bpm.toDouble()));
-              if (bpmData.length > 25) {
-                bpmData.removeAt(0);
-              }
-            });
-          }
-        }
-      });
-    } catch (e) {
-      debugPrint("Notification error: $e");
-    }
+    _startScan();
   }
 
   @override
   void dispose() {
-    mockTimer?.cancel();
-    scanSub?.cancel();
-    valueSub?.cancel();
-    if (!kIsWeb) {
-      connectedDevice?.disconnect();
-    }
+    hrSubscription?.cancel();
+    connectedDevice?.disconnect();
+    _pinController.dispose();
     super.dispose();
   }
 
+  // --- Bluetooth Scan & Refresh ---
+  void _startScan() async {
+    setState(() {
+      scanResults.clear();
+      isScanning = true;
+    });
+
+    try {
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+      FlutterBluePlus.scanResults.listen((results) {
+        if (mounted) {
+          setState(() {
+            scanResults = results;
+          });
+        }
+      });
+    } catch (e) {
+      debugPrint("Scan error: $e");
+    } finally {
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted) setState(() => isScanning = false);
+      });
+    }
+  }
+
+  // --- Device Connection & Service Discovery ---
+  Future<void> _connectToDevice(BluetoothDevice device) async {
+    await FlutterBluePlus.stopScan();
+    setState(() => isScanning = false);
+
+    try {
+      await device.connect(timeout: const Duration(seconds: 10));
+      setState(() {
+        connectedDevice = device;
+        isAuthenticated = false;
+        currentBpm = 0;
+      });
+
+      List<BluetoothService> services = await device.discoverServices();
+      for (var service in services) {
+        if (service.uuid.toString().toLowerCase() == serviceUuid) {
+          for (var char in service.characteristics) {
+            if (char.uuid.toString().toLowerCase() == passCharUuid) {
+              passCharacteristic = char;
+            }
+            if (char.uuid.toString().toLowerCase() == hrCharUuid) {
+              hrCharacteristic = char;
+            }
+          }
+        }
+      }
+
+      if (passCharacteristic != null && hrCharacteristic != null) {
+        _showPinDialog();
+      } else {
+        _showSnackBar("Required pulse monitor characteristics not found!");
+      }
+    } catch (e) {
+      _showSnackBar("Connection failed: $e");
+    }
+  }
+
+  // --- Authentication Dialog ---
+  void _showPinDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text("Device Authentication"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text("Enter the PIN to access biometric pulse data:"),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _pinController,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 6,
+                decoration: const InputDecoration(
+                  labelText: "PIN (Default: 1234)",
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _disconnect();
+              },
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _authenticateDevice(_pinController.text.trim());
+              },
+              child: const Text("Unlock"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // --- PIN Authentication & Stream Subscription ---
+  Future<void> _authenticateDevice(String pin) async {
+    if (passCharacteristic == null || hrCharacteristic == null) return;
+
+    try {
+      // Send PIN string as bytes
+      await passCharacteristic!.write(pin.codeUnits);
+      
+      setState(() {
+        isAuthenticated = true;
+      });
+
+      // Enable notifications on Heart Rate Characteristic
+      await hrCharacteristic!.setNotifyValue(true);
+      hrSubscription = hrCharacteristic!.onValueReceived.listen((value) {
+        if (value.isNotEmpty && mounted) {
+          setState(() {
+            currentBpm = value.first;
+          });
+        }
+      });
+
+      _showSnackBar("Authenticated successfully!");
+    } catch (e) {
+      _showSnackBar("Authentication failed: $e");
+      _disconnect();
+    }
+  }
+
+  void _disconnect() async {
+    await hrSubscription?.cancel();
+    await connectedDevice?.disconnect();
+    setState(() {
+      connectedDevice = null;
+      isAuthenticated = false;
+      currentBpm = 0;
+      passCharacteristic = null;
+      hrCharacteristic = null;
+    });
+  }
+
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  // --- UI Layout ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Pulse Monitor Live'),
-        centerTitle: true,
-        backgroundColor: Colors.transparent,
-        elevation: 0,
+        title: const Text("Pulse Monitor"),
+        actions: [
+          IconButton(
+            icon: Icon(isScanning ? Icons.sync : Icons.refresh),
+            tooltip: "Scan for Devices",
+            onPressed: isScanning ? null : _startScan,
+          ),
+        ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          children: [
-            // Status Indicator
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 20),
-              decoration: BoxDecoration(
-                color: (isConnected || kIsWeb)
-                    ? Colors.green.withOpacity(0.2)
-                    : Colors.red.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(30),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    (isConnected || kIsWeb)
-                        ? Icons.bluetooth_connected
-                        : Icons.bluetooth_searching,
-                    color: (isConnected || kIsWeb)
-                        ? Colors.greenAccent
-                        : Colors.redAccent,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    kIsWeb
-                        ? "Web Preview Mode (Edge)"
-                        : isConnected
-                            ? "Connected to PulseMonitor"
-                            : isScanning
-                                ? "Scanning for Bluetooth..."
-                                : "Disconnected",
-                    style: TextStyle(
-                      color: (isConnected || kIsWeb)
-                          ? Colors.greenAccent
-                          : Colors.redAccent,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 30),
+      body: connectedDevice == null ? _buildDeviceList() : _buildPulseView(),
+    );
+  }
 
-            // BPM Display Card
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(30),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E293B),
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.redAccent.withOpacity(0.15),
-                    blurRadius: 20,
-                    spreadRadius: 5,
-                  )
-                ],
+  // Device Discovery Menu
+  Widget _buildDeviceList() {
+    return Column(
+      children: [
+        if (isScanning) const LinearProgressIndicator(),
+        Padding(
+          padding: const EdgeInsets.all(12.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "Available Devices (${scanResults.length})",
+                style: Theme.of(context).textTheme.titleMedium,
               ),
-              child: Column(
-                children: [
-                  const Icon(Icons.favorite, color: Colors.redAccent, size: 60),
-                  const SizedBox(height: 10),
-                  Text(
-                    currentBPM > 0 ? '$currentBPM' : '--',
-                    style: const TextStyle(
-                      fontSize: 72,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const Text(
-                    'BEATS PER MINUTE',
-                    style: TextStyle(color: Colors.grey, letterSpacing: 1.5),
-                  ),
-                ],
+              ElevatedButton.icon(
+                onPressed: isScanning ? null : _startScan,
+                icon: const Icon(Icons.search, size: 18),
+                label: const Text("Rescan"),
               ),
-            ),
-            const SizedBox(height: 30),
-
-            // Live Pulse Graph
-            Expanded(
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E293B),
-                  borderRadius: BorderRadius.circular(24),
-                ),
-                child: bpmData.isEmpty
-                    ? const Center(child: Text("Waiting for heart rate data..."))
-                    : LineChart(
-                        LineChartData(
-                          gridData: const FlGridData(show: false),
-                          titlesData: const FlTitlesData(show: false),
-                          borderData: FlBorderData(show: false),
-                          lineBarsData: [
-                            LineChartBarData(
-                              spots: bpmData,
-                              isCurved: true,
-                              color: Colors.redAccent,
-                              barWidth: 4,
-                              isStrokeCapRound: true,
-                              dotData: const FlDotData(show: false),
-                              belowBarData: BarAreaData(
-                                show: true,
-                                color: Colors.redAccent.withOpacity(0.2),
-                              ),
-                            ),
-                          ],
-                        ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: scanResults.isEmpty
+              ? Center(
+                  child: Text(
+                    isScanning ? "Scanning for Bluetooth devices..." : "No devices found. Tap Refresh to scan.",
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: scanResults.length,
+                  itemBuilder: (context, index) {
+                    final result = scanResults[index];
+                    final name = result.device.platformName.isNotEmpty
+                        ? result.device.platformName
+                        : "Unknown Device";
+                    
+                    return ListTile(
+                      leading: const Icon(Icons.bluetooth, color: Colors.blueAccent),
+                      title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(result.device.remoteId.str),
+                      trailing: ElevatedButton(
+                        onPressed: () => _connectToDevice(result.device),
+                        child: const Text("Connect"),
                       ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  // Pulse Display Screen
+  Widget _buildPulseView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.favorite,
+              color: isAuthenticated ? Colors.red : Colors.grey,
+              size: 100,
+            ),
+            const SizedBox(height: 20),
+            Text(
+              isAuthenticated ? "$currentBpm BPM" : "LOCKED",
+              style: const TextStyle(
+                fontSize: 48,
+                fontWeight: FontWeight.bold,
               ),
             ),
-
             const SizedBox(height: 10),
-            ElevatedButton(
-              onPressed: (isConnected || kIsWeb) ? null : startScanning,
+            Text(
+              isAuthenticated
+                  ? "Connected to ${connectedDevice?.platformName}"
+                  : "Authenticating with Device...",
+              style: const TextStyle(color: Colors.grey, fontSize: 16),
+            ),
+            const SizedBox(height: 40),
+            ElevatedButton.icon(
+              onPressed: _disconnect,
+              icon: const Icon(Icons.bluetooth_disabled),
+              label: const Text("Disconnect Device"),
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.redAccent,
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                backgroundColor: Colors.red.shade900,
+                foregroundColor: Colors.white,
               ),
-              child: Text(kIsWeb
-                  ? "Web Mode Active"
-                  : isConnected
-                      ? "Connected"
-                      : "Rescan Bluetooth"),
-            )
+            ),
           ],
         ),
       ),
