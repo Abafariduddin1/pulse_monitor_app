@@ -90,42 +90,46 @@ class _PulseHomePageState extends State<PulseHomePage> {
     }
   }
 
-  // --- Device Connection & Service Discovery ---
-  Future<void> _connectToDevice(BluetoothDevice device) async {
-    await FlutterBluePlus.stopScan();
-    setState(() => isScanning = false);
+Future<void> _connectToDevice(BluetoothDevice device) async {
+  await FlutterBluePlus.stopScan();
+  setState(() => isScanning = false);
 
-    try {
-      await device.connect(timeout: const Duration(seconds: 10));
-      setState(() {
-        connectedDevice = device;
-        isAuthenticated = false;
-        currentBpm = 0;
-      });
+  try {
+    // FIX: Calling connect without positional syntax errors
+    await device.connect(
+  license: License.nonprofit, // or License.commercial if applicable
+  timeout: const Duration(seconds: 35),
+);
+    
+    setState(() {
+      connectedDevice = device;
+      isAuthenticated = false;
+      currentBpm = 0;
+    });
 
-      List<BluetoothService> services = await device.discoverServices();
-      for (var service in services) {
-        if (service.uuid.toString().toLowerCase() == serviceUuid) {
-          for (var char in service.characteristics) {
-            if (char.uuid.toString().toLowerCase() == passCharUuid) {
-              passCharacteristic = char;
-            }
-            if (char.uuid.toString().toLowerCase() == hrCharUuid) {
-              hrCharacteristic = char;
-            }
+    List<BluetoothService> services = await device.discoverServices();
+    for (var service in services) {
+      if (service.uuid.toString().toLowerCase() == serviceUuid) {
+        for (var char in service.characteristics) {
+          if (char.uuid.toString().toLowerCase() == passCharUuid) {
+            passCharacteristic = char;
+          }
+          if (char.uuid.toString().toLowerCase() == hrCharUuid) {
+            hrCharacteristic = char;
           }
         }
       }
-
-      if (passCharacteristic != null && hrCharacteristic != null) {
-        _showPinDialog();
-      } else {
-        _showSnackBar("Required pulse monitor characteristics not found!");
-      }
-    } catch (e) {
-      _showSnackBar("Connection failed: $e");
     }
+
+    if (passCharacteristic != null && hrCharacteristic != null) {
+      _showPinDialog();
+    } else {
+      _showSnackBar("Required pulse monitor characteristics not found!");
+    }
+  } catch (e) {
+    _showSnackBar("Connection failed: $e");
   }
+}
 
   // --- Authentication Dialog ---
   void _showPinDialog() {
