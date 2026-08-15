@@ -19,6 +19,11 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Inject Dummy Development Team ID
+        run: |
+          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "1234567890";/g' ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj || true
+
       - name: Build iOS App
         run: flutter build ios --release --no-codesign
 
