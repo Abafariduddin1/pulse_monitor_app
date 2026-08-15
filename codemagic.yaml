@@ -1,0 +1,18 @@
+workflows:
+  ios-release-ipa:
+    name: iOS Release IPA (Unsigned)
+    max_build_duration: 30
+    instance_type: mac_mini_m1
+    environment:
+      flutter: stable
+      xcode: latest
+    scripts:
+      - name: Get Flutter dependencies
+        script: flutter pub get
+      - name: Install CocoaPods
+        script: find . -name "Podfile" -execdir pod install \;
+      - name: Build Unsigned iOS IPA
+        script: |
+          flutter build ipa --release --no-codesign
+    artifacts:
+      - build/ios/ipa/*.ipa
