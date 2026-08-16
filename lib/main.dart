@@ -1,22 +1,22 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp; // Prefix to avoid License collision
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 void main() {
   runApp(const SecurePulseApp());
 }
 
 class SecurePulseApp extends StatelessWidget {
-  const SecurePulseApp({super.key});
-
+  const SecurePulseApp({Key? key}) : super(key: key);
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Secure Pulse',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.red),
-        useMaterial3: true,
+      theme: ThemeData.dark().copyWith(
+        primaryColor: Colors.blue,
+        scaffoldBackgroundColor: const Color(0xFF121212),
       ),
       home: const HeartRateScreen(),
     );
@@ -24,214 +24,228 @@ class SecurePulseApp extends StatelessWidget {
 }
 
 class HeartRateScreen extends StatefulWidget {
-  const HeartRateScreen({super.key});
-
+  const HeartRateScreen({Key? key}) : super(key: key);
   @override
-  State<HeartRateScreen> createState() => _HeartRateScreenState();
+  _HeartRateScreenState createState() => _HeartRateScreenState();
 }
 
 class _HeartRateScreenState extends State<HeartRateScreen> {
-  fbp.BluetoothDevice? targetDevice;
-  fbp.BluetoothCharacteristic? authCharacteristic;
-  fbp.BluetoothCharacteristic? hrCharacteristic;
-  StreamSubscription<List<int>>? hrSubscription;
+  BluetoothDevice? targetDevice;
+  BluetoothCharacteristic? authCharacteristic;
+  BluetoothCharacteristic? heartRateCharacteristic;
+  BluetoothCharacteristic? alertCharacteristic;
 
   bool isScanning = false;
   bool isConnected = false;
   bool isAuthenticated = false;
   int currentHeartRate = 0;
-  String statusMessage = "Press Scan to find PulseShield";
 
-  final String targetDeviceName = "PulseShield";
-  final String hrServiceUuid = "180D";
-  final String hrCharUuid = "2A37";
+  final String deviceName = "PulseShield";
   final String authCharUuid = "12345678-1234-5678-1234-567812345678";
+  final String hrCharUuid = "2A37";
+  final String alertCharUuid = "19B10003-E8F2-537E-4F6C-D104768A1214";
+
+  // Graph data
+  List<FlSpot> ecgData = [];
+  Timer? graphTimer;
+  double timeX = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _startGraphSimulation();
+  }
+
+  void _startGraphSimulation() {
+    graphTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (!mounted) return;
+      setState(() {
+        timeX += 0.05;
+        // Generate an ECG-like pulse based on current BPM
+        double yValue = 0;
+        if (currentHeartRate > 0) {
+          double cycle = (60 / currentHeartRate);
+          double positionInCycle = timeX % cycle;
+          
+          if (positionInCycle < 0.1) {
+            yValue = 3.0 * math.sin((positionInCycle / 0.1) * math.pi); // Spike
+          } else if (positionInCycle > 0.15 && positionInCycle < 0.25) {
+            yValue = 1.0 * math.sin(((positionInCycle - 0.15) / 0.1) * math.pi); // T-wave
+          }
+        }
+        
+        ecgData.add(FlSpot(timeX, yValue));
+        if (ecgData.length > 60) ecgData.removeAt(0); // Keep window sliding
+      });
+    });
+  }
 
   @override
   void dispose() {
-    hrSubscription?.cancel();
-    targetDevice?.disconnect();
+    graphTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> startScan() async {
-    setState(() {
-      isScanning = true;
-      statusMessage = "Scanning for $targetDeviceName...";
+  void scanAndConnect() async {
+    setState(() => isScanning = true);
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+
+    FlutterBluePlus.scanResults.listen((results) {
+      for (ScanResult r in results) {
+        if (r.device.platformName == deviceName) {
+          FlutterBluePlus.stopScan();
+          connectToDevice(r.device);
+          break;
+        }
+      }
     });
+  }
 
-    try {
-      await fbp.FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
-      fbp.FlutterBluePlus.scanResults.listen((results) {
-        for (fbp.ScanResult r in results) {
-          if (r.device.advName == targetDeviceName) {
-            fbp.FlutterBluePlus.stopScan();
-            setState(() {
-              targetDevice = r.device;
-              isScanning = false;
-              statusMessage = "Found device. Connecting...";
-            });
-            connectToDevice();
-            break;
-          }
-        }
-      });
-    } catch (e) {
-      setState(() {
-        isScanning = false;
-        statusMessage = "Scan failed: $e";
-      });
+  void connectToDevice(BluetoothDevice device) async {
+    // Added the license parameter back in to satisfy flutter_blue_plus
+    await device.connect(
+      license: License.nonprofit, 
+      autoConnect: false,
+    );
+    
+    setState(() {
+      targetDevice = device;
+      isConnected = true;
+      isScanning = false;
+    });
+    discoverServices(device);
+  }
+
+  void discoverServices(BluetoothDevice device) async {
+    List<BluetoothService> services = await device.discoverServices();
+    for (var service in services) {
+      for (var char in service.characteristics) {
+        String uuid = char.uuid.toString().toUpperCase();
+        if (uuid == hrCharUuid) heartRateCharacteristic = char;
+        if (uuid == authCharUuid) authCharacteristic = char;
+        if (uuid == alertCharUuid) alertCharacteristic = char;
+      }
     }
   }
 
-  Future<void> connectToDevice() async {
-    if (targetDevice == null) return;
+  void authenticateAndListen(String pin) async {
+    if (authCharacteristic != null) {
+      await authCharacteristic!.write(pin.codeUnits);
+      await Future.delayed(const Duration(milliseconds: 500));
+      List<int> response = await authCharacteristic!.read();
+      String responseStr = String.fromCharCodes(response);
 
-    try {
-      // USING THE PREFIXED LICENSE ENUM TO AVOID COLLISION
-      await targetDevice!.connect(
-        license: fbp.License.nonprofit,
-        autoConnect: false,
-        mtu: 512,
-      );
-
-      setState(() {
-        isConnected = true;
-        statusMessage = "Connected. Discovering services...";
-      });
-
-      List<fbp.BluetoothService> services = await targetDevice!.discoverServices();
-      for (var service in services) {
-        if (service.uuid.toString().toUpperCase() == hrServiceUuid) {
-          for (var char in service.characteristics) {
-            if (char.uuid.toString().toUpperCase() == hrCharUuid) {
-              hrCharacteristic = char;
-            } else if (char.uuid.toString().toUpperCase() == authCharUuid) {
-              authCharacteristic = char;
-            }
+      if (responseStr == "UNLOCKED") {
+        setState(() => isAuthenticated = true);
+        
+        // Listen to Heart Rate
+        await heartRateCharacteristic?.setNotifyValue(true);
+        heartRateCharacteristic?.lastValueStream.listen((value) {
+          if (value.isNotEmpty) {
+            setState(() => currentHeartRate = value[0]);
           }
-        }
-      }
-
-      if (authCharacteristic != null) {
-        setState(() {
-          statusMessage = "Device Locked. Awaiting PIN.";
         });
-        _showPinDialog();
+
+        // Listen to Fall Alerts
+        await alertCharacteristic?.setNotifyValue(true);
+        alertCharacteristic?.lastValueStream.listen((value) {
+          if (value.isNotEmpty) {
+            if (value[0] == 1) _showAlert("PRE-FALL WARNING", "Sudden stumble detected!", Colors.orange);
+            if (value[0] == 2) _showAlert("CRITICAL FALL", "Impact and stillness detected!", Colors.red);
+          }
+        });
       } else {
-        setState(() {
-          statusMessage = "Security characteristic not found.";
-        });
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Invalid PIN")));
       }
-    } catch (e) {
-      setState(() {
-        statusMessage = "Connection failed: $e";
-        isConnected = false;
-      });
     }
   }
 
-  void _showPinDialog() {
-    final TextEditingController pinController = TextEditingController();
+  void _showAlert(String title, String message, Color color) {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: const Text("Enter PIN"),
-        content: TextField(
-          controller: pinController,
-          keyboardType: TextInputType.number,
-          obscureText: true,
-          decoration: const InputDecoration(hintText: "4-digit PIN"),
-        ),
+        backgroundColor: color,
+        title: Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        content: Text(message, style: const TextStyle(color: Colors.white, fontSize: 18)),
         actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              authenticate(pinController.text);
-            },
-            child: const Text("Unlock"),
-          )
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("I'm OK"),
+          ),
         ],
       ),
     );
   }
 
-  Future<void> authenticate(String pin) async {
-    if (authCharacteristic == null) return;
-
-    await authCharacteristic!.write(utf8.encode(pin), withoutResponse: false);
-    
-    // Slight delay to allow Arduino to process the PIN
-    await Future.delayed(const Duration(milliseconds: 500));
-    
-    List<int> response = await authCharacteristic!.read();
-    String responseStr = utf8.decode(response);
-
-    if (responseStr == "UNLOCKED") {
-      setState(() {
-        isAuthenticated = true;
-        statusMessage = "Unlocked! Reading heart rate...";
-      });
-      startListeningToHeartRate();
-    } else {
-      setState(() {
-        statusMessage = "Incorrect PIN. Try again.";
-      });
-      targetDevice?.disconnect();
-      setState(() {
-        isConnected = false;
-      });
-    }
-  }
-
-  Future<void> startListeningToHeartRate() async {
-    if (hrCharacteristic == null) return;
-
-    await hrCharacteristic!.setNotifyValue(true);
-    hrSubscription = hrCharacteristic!.lastValueStream.listen((value) {
-      if (value.isNotEmpty) {
-        setState(() {
-          currentHeartRate = value[0];
-        });
-      }
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("Secure Pulse"),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-      ),
+      appBar: AppBar(title: const Text('Secure Pulse & Fall Detection'), backgroundColor: Colors.black),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.favorite,
-              color: isAuthenticated ? Colors.red : Colors.grey,
-              size: 100,
-            ),
-            const SizedBox(height: 20),
-            Text(
-              isAuthenticated ? "$currentHeartRate BPM" : "--",
-              style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              statusMessage,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 40),
-            ElevatedButton(
-              onPressed: (isScanning || isConnected) ? null : startScan,
-              child: Text(isScanning ? "Scanning..." : "Scan for Device"),
-            ),
-          ],
-        ),
+        child: !isConnected
+            ? ElevatedButton(
+                onPressed: isScanning ? null : scanAndConnect,
+                child: Text(isScanning ? 'Scanning...' : 'Connect to PulseShield'),
+              )
+            : !isAuthenticated
+                ? Padding(
+                    padding: const EdgeInsets.all(32.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text("Enter PIN", style: TextStyle(fontSize: 24, color: Colors.white)),
+                        const SizedBox(height: 20),
+                        TextField(
+                          keyboardType: TextInputType.number,
+                          obscureText: true,
+                          style: const TextStyle(color: Colors.white),
+                          onSubmitted: (value) => authenticateAndListen(value),
+                          decoration: const InputDecoration(
+                            filled: true,
+                            fillColor: Colors.grey,
+                            hintText: '1234',
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.favorite, color: Colors.red, size: 80),
+                      Text(
+                        "$currentHeartRate BPM",
+                        style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      const SizedBox(height: 40),
+                      // Animated Heart Rate Graph
+                      SizedBox(
+                        height: 150,
+                        width: MediaQuery.of(context).size.width * 0.9,
+                        child: LineChart(
+                          LineChartData(
+                            gridData: FlGridData(show: true, drawVerticalLine: false),
+                            titlesData: FlTitlesData(show: false),
+                            borderData: FlBorderData(show: false),
+                            minY: -2,
+                            maxY: 4,
+                            lineBarsData: [
+                              LineChartBarData(
+                                spots: ecgData,
+                                isCurved: true,
+                                color: Colors.greenAccent,
+                                barWidth: 3,
+                                isStrokeCapRound: true,
+                                dotData: FlDotData(show: false),
+                                belowBarData: BarAreaData(show: false),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
       ),
     );
   }
