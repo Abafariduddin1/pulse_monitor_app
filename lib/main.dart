@@ -9,7 +9,9 @@ void main() {
 }
 
 class SecurePulseApp extends StatelessWidget {
-  const SecurePulseApp({Key? key}) : super(key: key);
+  // Modern Dart syntax for keys
+  const SecurePulseApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -24,9 +26,10 @@ class SecurePulseApp extends StatelessWidget {
 }
 
 class HeartRateScreen extends StatefulWidget {
-  const HeartRateScreen({Key? key}) : super(key: key);
+  const HeartRateScreen({super.key});
+
   @override
-  _HeartRateScreenState createState() => _HeartRateScreenState();
+  State<HeartRateScreen> createState() => _HeartRateScreenState();
 }
 
 class _HeartRateScreenState extends State<HeartRateScreen> {
@@ -49,6 +52,9 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   List<FlSpot> ecgData = [];
   Timer? graphTimer;
   double timeX = 0;
+  
+  // Explicitly type the subscription to fix inference errors
+  StreamSubscription<List<ScanResult>>? scanSubscription;
 
   @override
   void initState() {
@@ -59,9 +65,9 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   void _startGraphSimulation() {
     graphTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
       if (!mounted) return;
+      
       setState(() {
         timeX += 0.05;
-        // Generate an ECG-like pulse based on current BPM
         double yValue = 0;
         if (currentHeartRate > 0) {
           double cycle = (60 / currentHeartRate);
@@ -83,61 +89,73 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   @override
   void dispose() {
     graphTimer?.cancel();
+    scanSubscription?.cancel();
     super.dispose();
   }
 
-  void scanAndConnect() async {
+  Future<void> scanAndConnect() async {
+    if (!mounted) return;
     setState(() => isScanning = true);
-    
-    // Stop any active scans before starting a new one
+
+    // Check adapter state before scanning
+    if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Please turn on Bluetooth on your phone.")),
+        );
+        setState(() => isScanning = false);
+      }
+      return;
+    }
+
     await FlutterBluePlus.stopScan();
 
-    // Listen to scan results
-    var subscription;
-    subscription = FlutterBluePlus.scanResults.listen((results) {
+    scanSubscription = FlutterBluePlus.scanResults.listen((results) {
       for (ScanResult r in results) {
-        // Print found devices to console for easy debugging
-        print('Found device: ${r.device.advName} / ${r.device.platformName}');
+        // Using advName as localName is deprecated
+        String name = r.device.advName;
+        
+        bool matchesUuid = r.advertisementData.serviceUuids
+            .any((uuid) => uuid.toString().toUpperCase().contains("180D"));
 
-        // Check advName, platformName, or localName
-        if (r.device.advName == deviceName || 
-            r.device.platformName == deviceName || 
-            r.advertisementData.localName == deviceName) {
-          
+        if (name == deviceName || matchesUuid) {
           FlutterBluePlus.stopScan();
-          subscription.cancel();
+          scanSubscription?.cancel();
           connectToDevice(r.device);
           break;
         }
       }
     });
 
-    // Start scanning
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
+    await FlutterBluePlus.startScan(
+      withServices: [Guid("180D")],
+      timeout: const Duration(seconds: 10),
+    );
 
-    // Reset scanning state if timeout finishes without finding device
-    await Future.delayed(const Duration(seconds: 8));
+    await Future.delayed(const Duration(seconds: 10));
     if (mounted && !isConnected) {
       setState(() => isScanning = false);
     }
   }
 
-  void connectToDevice(BluetoothDevice device) async {
-    // Added the license parameter back in to satisfy flutter_blue_plus
+  Future<void> connectToDevice(BluetoothDevice device) async {
+    // Add license parameter for flutter_blue_plus
     await device.connect(
-      license: License.nonprofit, 
+      license: License.nonprofit,
       autoConnect: false,
     );
     
+    if (!mounted) return;
     setState(() {
       targetDevice = device;
       isConnected = true;
       isScanning = false;
     });
+    
     discoverServices(device);
   }
 
-  void discoverServices(BluetoothDevice device) async {
+  Future<void> discoverServices(BluetoothDevice device) async {
     List<BluetoothService> services = await device.discoverServices();
     for (var service in services) {
       for (var char in service.characteristics) {
@@ -149,43 +167,55 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
     }
   }
 
-  void authenticateAndListen(String pin) async {
+  Future<void> authenticateAndListen(String pin) async {
     if (authCharacteristic != null) {
       await authCharacteristic!.write(pin.codeUnits);
       await Future.delayed(const Duration(milliseconds: 500));
       List<int> response = await authCharacteristic!.read();
       String responseStr = String.fromCharCodes(response);
 
+      if (!mounted) return; // Prevent async gap issues
+
       if (responseStr == "UNLOCKED") {
         setState(() => isAuthenticated = true);
         
         // Listen to Heart Rate
-        await heartRateCharacteristic?.setNotifyValue(true);
-        heartRateCharacteristic?.lastValueStream.listen((value) {
-          if (value.isNotEmpty) {
-            setState(() => currentHeartRate = value[0]);
-          }
-        });
+        if (heartRateCharacteristic != null) {
+          await heartRateCharacteristic!.setNotifyValue(true);
+          heartRateCharacteristic!.lastValueStream.listen((value) {
+            if (value.isNotEmpty && mounted) {
+              setState(() => currentHeartRate = value[0]);
+            }
+          });
+        }
 
         // Listen to Fall Alerts
-        await alertCharacteristic?.setNotifyValue(true);
-        alertCharacteristic?.lastValueStream.listen((value) {
-          if (value.isNotEmpty) {
-            if (value[0] == 1) _showAlert("PRE-FALL WARNING", "Sudden stumble detected!", Colors.orange);
-            if (value[0] == 2) _showAlert("CRITICAL FALL", "Impact and stillness detected!", Colors.red);
-          }
-        });
+        if (alertCharacteristic != null) {
+          await alertCharacteristic!.setNotifyValue(true);
+          alertCharacteristic!.lastValueStream.listen((value) {
+            if (value.isNotEmpty && mounted) {
+              if (value[0] == 1) {
+                _showAlert("PRE-FALL WARNING", "Sudden stumble detected!", Colors.orange);
+              } else if (value[0] == 2) {
+                _showAlert("CRITICAL FALL", "Impact and stillness detected!", Colors.red);
+              }
+            }
+          });
+        }
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Invalid PIN")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Invalid PIN")),
+        );
       }
     }
   }
 
   void _showAlert(String title, String message, Color color) {
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
+      builder: (BuildContext context) => AlertDialog(
         backgroundColor: color,
         title: Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         content: Text(message, style: const TextStyle(color: Colors.white, fontSize: 18)),
@@ -202,7 +232,10 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Secure Pulse & Fall Detection'), backgroundColor: Colors.black),
+      appBar: AppBar(
+        title: const Text('Secure Pulse & Fall Detection'), 
+        backgroundColor: Colors.black
+      ),
       body: Center(
         child: !isConnected
             ? ElevatedButton(
@@ -240,14 +273,13 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
                         style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.white),
                       ),
                       const SizedBox(height: 40),
-                      // Animated Heart Rate Graph
                       SizedBox(
                         height: 150,
                         width: MediaQuery.of(context).size.width * 0.9,
                         child: LineChart(
                           LineChartData(
-                            gridData: FlGridData(show: true, drawVerticalLine: false),
-                            titlesData: FlTitlesData(show: false),
+                            gridData: const FlGridData(show: true, drawVerticalLine: false),
+                            titlesData: const FlTitlesData(show: false),
                             borderData: FlBorderData(show: false),
                             minY: -2,
                             maxY: 4,
@@ -258,7 +290,7 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
                                 color: Colors.greenAccent,
                                 barWidth: 3,
                                 isStrokeCapRound: true,
-                                dotData: FlDotData(show: false),
+                                dotData: const FlDotData(show: false),
                                 belowBarData: BarAreaData(show: false),
                               ),
                             ],
