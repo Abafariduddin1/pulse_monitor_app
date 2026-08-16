@@ -88,17 +88,38 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
 
   void scanAndConnect() async {
     setState(() => isScanning = true);
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+    
+    // Stop any active scans before starting a new one
+    await FlutterBluePlus.stopScan();
 
-    FlutterBluePlus.scanResults.listen((results) {
+    // Listen to scan results
+    var subscription;
+    subscription = FlutterBluePlus.scanResults.listen((results) {
       for (ScanResult r in results) {
-        if (r.device.platformName == deviceName) {
+        // Print found devices to console for easy debugging
+        print('Found device: ${r.device.advName} / ${r.device.platformName}');
+
+        // Check advName, platformName, or localName
+        if (r.device.advName == deviceName || 
+            r.device.platformName == deviceName || 
+            r.advertisementData.localName == deviceName) {
+          
           FlutterBluePlus.stopScan();
+          subscription.cancel();
           connectToDevice(r.device);
           break;
         }
       }
     });
+
+    // Start scanning
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
+
+    // Reset scanning state if timeout finishes without finding device
+    await Future.delayed(const Duration(seconds: 8));
+    if (mounted && !isConnected) {
+      setState(() => isScanning = false);
+    }
   }
 
   void connectToDevice(BluetoothDevice device) async {
