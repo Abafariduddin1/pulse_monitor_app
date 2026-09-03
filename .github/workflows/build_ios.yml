@@ -2,9 +2,11 @@ name: Build SideStore IPA
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*' # Triggers workflow when you push a tag like v1.0.0
-  workflow_dispatch: # Allows manual run from GitHub Actions tab
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
