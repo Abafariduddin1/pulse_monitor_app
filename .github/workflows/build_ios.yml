@@ -55,7 +55,14 @@ jobs:
           cd build/ios/ipa
           zip -r OrthoWearable.ipa Payload
 
-      # 4. Upload IPA to GitHub Release
+      # 4. Upload IPA as a Workflow Artifact (Available on EVERY run)
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrthoWearable-IPA
+          path: build/ios/ipa/OrthoWearable.ipa
+
+      # 5. Upload to GitHub Releases (ONLY triggers when a tag like v1.0.0 is pushed)
       - name: Create GitHub Release and Upload IPA
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
