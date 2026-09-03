@@ -9,13 +9,13 @@ void main() {
 }
 
 class SecurePulseApp extends StatelessWidget {
-  // Modern Dart syntax for keys
   const SecurePulseApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Secure Pulse',
+      title: 'OrthoWearable Pulse',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         primaryColor: Colors.blue,
         scaffoldBackgroundColor: const Color(0xFF121212),
@@ -36,24 +36,28 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   BluetoothDevice? targetDevice;
   BluetoothCharacteristic? authCharacteristic;
   BluetoothCharacteristic? heartRateCharacteristic;
+  BluetoothCharacteristic? postureCharacteristic;
   BluetoothCharacteristic? alertCharacteristic;
 
   bool isScanning = false;
   bool isConnected = false;
   bool isAuthenticated = false;
   int currentHeartRate = 0;
+  bool isStanding = false;
 
-  final String deviceName = "PulseShield";
-  final String authCharUuid = "12345678-1234-5678-1234-567812345678";
-  final String hrCharUuid = "2A37";
+  // Custom UUIDs matching Arduino BLE firmware
+  final String deviceName = "OrthoWearable";
+  final String serviceUuid = "19B10000-E8F2-537E-4F6C-D104768A1214";
+  final String bpmCharUuid = "19B10001-E8F2-537E-4F6C-D104768A1214";
+  final String postureCharUuid = "19B10002-E8F2-537E-4F6C-D104768A1214";
   final String alertCharUuid = "19B10003-E8F2-537E-4F6C-D104768A1214";
+  final String authCharUuid = "12345678-1234-5678-1234-567812345678";
 
-  // Graph data
+  // Real-time graph simulation
   List<FlSpot> ecgData = [];
   Timer? graphTimer;
   double timeX = 0;
-  
-  // Explicitly type the subscription to fix inference errors
+
   StreamSubscription<List<ScanResult>>? scanSubscription;
 
   @override
@@ -65,23 +69,23 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   void _startGraphSimulation() {
     graphTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
       if (!mounted) return;
-      
+
       setState(() {
         timeX += 0.05;
         double yValue = 0;
         if (currentHeartRate > 0) {
           double cycle = (60 / currentHeartRate);
           double positionInCycle = timeX % cycle;
-          
+
           if (positionInCycle < 0.1) {
-            yValue = 3.0 * math.sin((positionInCycle / 0.1) * math.pi); // Spike
+            yValue = 3.0 * math.sin((positionInCycle / 0.1) * math.pi); // R-Spike
           } else if (positionInCycle > 0.15 && positionInCycle < 0.25) {
-            yValue = 1.0 * math.sin(((positionInCycle - 0.15) / 0.1) * math.pi); // T-wave
+            yValue = 1.0 * math.sin(((positionInCycle - 0.15) / 0.1) * math.pi); // T-Wave
           }
         }
-        
+
         ecgData.add(FlSpot(timeX, yValue));
-        if (ecgData.length > 60) ecgData.removeAt(0); // Keep window sliding
+        if (ecgData.length > 60) ecgData.removeAt(0);
       });
     });
   }
@@ -97,11 +101,10 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
     if (!mounted) return;
     setState(() => isScanning = true);
 
-    // Check adapter state before scanning
     if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Please turn on Bluetooth on your phone.")),
+          const SnackBar(content: Text("Please turn on Bluetooth on your device.")),
         );
         setState(() => isScanning = false);
       }
@@ -112,11 +115,9 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
 
     scanSubscription = FlutterBluePlus.scanResults.listen((results) {
       for (ScanResult r in results) {
-        // Using advName as localName is deprecated
         String name = r.device.advName;
-        
         bool matchesUuid = r.advertisementData.serviceUuids
-            .any((uuid) => uuid.toString().toUpperCase().contains("180D"));
+            .any((uuid) => uuid.toString().toUpperCase().contains("19B10000"));
 
         if (name == deviceName || matchesUuid) {
           FlutterBluePlus.stopScan();
@@ -128,7 +129,7 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
     });
 
     await FlutterBluePlus.startScan(
-      withServices: [Guid("180D")],
+      withServices: [Guid(serviceUuid)],
       timeout: const Duration(seconds: 10),
     );
 
@@ -138,20 +139,20 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
     }
   }
 
-  Future<void> connectToDevice(BluetoothDevice device) async {
-    // Add license parameter for flutter_blue_plus
+Future<void> connectToDevice(BluetoothDevice device) async {
+    // Add the required license parameter to remove the error
     await device.connect(
-      license: License.nonprofit,
+      license: License.nonprofit, 
       autoConnect: false,
     );
-    
+
     if (!mounted) return;
     setState(() {
       targetDevice = device;
       isConnected = true;
       isScanning = false;
     });
-    
+
     discoverServices(device);
   }
 
@@ -160,10 +161,17 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
     for (var service in services) {
       for (var char in service.characteristics) {
         String uuid = char.uuid.toString().toUpperCase();
-        if (uuid == hrCharUuid) heartRateCharacteristic = char;
-        if (uuid == authCharUuid) authCharacteristic = char;
+        if (uuid == bpmCharUuid) heartRateCharacteristic = char;
+        if (uuid == postureCharUuid) postureCharacteristic = char;
         if (uuid == alertCharUuid) alertCharacteristic = char;
+        if (uuid == authCharUuid) authCharacteristic = char;
       }
+    }
+
+    // Bypass PIN requirement if Arduino code doesn't implement an auth characteristic
+    if (authCharacteristic == null) {
+      setState(() => isAuthenticated = true);
+      _subscribeToSensors();
     }
   }
 
@@ -174,39 +182,54 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
       List<int> response = await authCharacteristic!.read();
       String responseStr = String.fromCharCodes(response);
 
-      if (!mounted) return; // Prevent async gap issues
+      if (!mounted) return;
 
       if (responseStr == "UNLOCKED") {
         setState(() => isAuthenticated = true);
-        
-        // Listen to Heart Rate
-        if (heartRateCharacteristic != null) {
-          await heartRateCharacteristic!.setNotifyValue(true);
-          heartRateCharacteristic!.lastValueStream.listen((value) {
-            if (value.isNotEmpty && mounted) {
-              setState(() => currentHeartRate = value[0]);
-            }
-          });
-        }
-
-        // Listen to Fall Alerts
-        if (alertCharacteristic != null) {
-          await alertCharacteristic!.setNotifyValue(true);
-          alertCharacteristic!.lastValueStream.listen((value) {
-            if (value.isNotEmpty && mounted) {
-              if (value[0] == 1) {
-                _showAlert("PRE-FALL WARNING", "Sudden stumble detected!", Colors.orange);
-              } else if (value[0] == 2) {
-                _showAlert("CRITICAL FALL", "Impact and stillness detected!", Colors.red);
-              }
-            }
-          });
-        }
+        _subscribeToSensors();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Invalid PIN")),
         );
       }
+    }
+  }
+
+  Future<void> _subscribeToSensors() async {
+    // 1. Listen to Heart Rate (BPM)
+    if (heartRateCharacteristic != null) {
+      await heartRateCharacteristic!.setNotifyValue(true);
+      heartRateCharacteristic!.lastValueStream.listen((value) {
+        if (value.isNotEmpty && mounted) {
+          setState(() => currentHeartRate = value[0]);
+        }
+      });
+    }
+
+    // 2. Listen to Posture (Sitting = 0, Standing = 1)
+    if (postureCharacteristic != null) {
+      await postureCharacteristic!.setNotifyValue(true);
+      postureCharacteristic!.lastValueStream.listen((value) {
+        if (value.isNotEmpty && mounted) {
+          setState(() => isStanding = (value[0] == 1));
+        }
+      });
+    }
+
+    // 3. Listen to Orthostatic Hypotension Alert
+    if (alertCharacteristic != null) {
+      await alertCharacteristic!.setNotifyValue(true);
+      alertCharacteristic!.lastValueStream.listen((value) {
+        if (value.isNotEmpty && mounted) {
+          if (value[0] == 1) {
+            _showAlert(
+              "ORTHOSTATIC WARNING",
+              "Rapid heart rate jump detected upon standing! Please sit down immediately.",
+              Colors.redAccent,
+            );
+          }
+        }
+      });
     }
   }
 
@@ -222,7 +245,8 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
         actions: [
           ElevatedButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text("I'm OK"),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.black),
+            child: const Text("I'm Sitting Down", style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -233,14 +257,15 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Secure Pulse & Fall Detection'), 
-        backgroundColor: Colors.black
+        title: const Text('OrthoWearable Dashboard'),
+        backgroundColor: Colors.black,
       ),
       body: Center(
         child: !isConnected
             ? ElevatedButton(
                 onPressed: isScanning ? null : scanAndConnect,
-                child: Text(isScanning ? 'Scanning...' : 'Connect to PulseShield'),
+                style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16)),
+                child: Text(isScanning ? 'Scanning for OrthoWearable...' : 'Connect to OrthoWearable'),
               )
             : !isAuthenticated
                 ? Padding(
@@ -264,40 +289,71 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
                       ],
                     ),
                   )
-                : Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.favorite, color: Colors.red, size: 80),
-                      Text(
-                        "$currentHeartRate BPM",
-                        style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.white),
-                      ),
-                      const SizedBox(height: 40),
-                      SizedBox(
-                        height: 150,
-                        width: MediaQuery.of(context).size.width * 0.9,
-                        child: LineChart(
-                          LineChartData(
-                            gridData: const FlGridData(show: true, drawVerticalLine: false),
-                            titlesData: const FlTitlesData(show: false),
-                            borderData: FlBorderData(show: false),
-                            minY: -2,
-                            maxY: 4,
-                            lineBarsData: [
-                              LineChartBarData(
-                                spots: ecgData,
-                                isCurved: true,
-                                color: Colors.greenAccent,
-                                barWidth: 3,
-                                isStrokeCapRound: true,
-                                dotData: const FlDotData(show: false),
-                                belowBarData: BarAreaData(show: false),
+                : SingleChildScrollView(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        // Heart Rate Indicator
+                        const Icon(Icons.favorite, color: Colors.red, size: 70),
+                        Text(
+                          "$currentHeartRate BPM",
+                          style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                        const SizedBox(height: 20),
+
+                        // Posture Indicator Card
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: isStanding ? Colors.orange.withOpacity(0.2) : Colors.blue.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: isStanding ? Colors.orange : Colors.blue),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                isStanding ? Icons.directions_walk : Icons.airline_seat_recline_normal,
+                                color: isStanding ? Colors.orange : Colors.blue,
+                                size: 28,
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                isStanding ? "Posture: Standing" : "Posture: Sitting",
+                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white),
                               ),
                             ],
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 30),
+
+                        // Real-time ECG Sliding Graph
+                        SizedBox(
+                          height: 160,
+                          width: MediaQuery.of(context).size.width * 0.9,
+                          child: LineChart(
+                            LineChartData(
+                              gridData: const FlGridData(show: true, drawVerticalLine: false),
+                              titlesData: const FlTitlesData(show: false),
+                              borderData: FlBorderData(show: false),
+                              minY: -2,
+                              maxY: 4,
+                              lineBarsData: [
+                                LineChartBarData(
+                                  spots: ecgData,
+                                  isCurved: true,
+                                  color: Colors.greenAccent,
+                                  barWidth: 3,
+                                  isStrokeCapRound: true,
+                                  dotData: const FlDotData(show: false),
+                                  belowBarData: BarAreaData(show: false),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
       ),
     );
