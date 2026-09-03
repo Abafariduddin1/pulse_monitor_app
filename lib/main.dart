@@ -140,22 +140,25 @@ class _HeartRateScreenState extends State<HeartRateScreen> {
   }
 
 Future<void> connectToDevice(BluetoothDevice device) async {
-    // Add the required license parameter to remove the error
-    await device.connect(
-      license: License.nonprofit, 
-      autoConnect: false,
-    );
+    try {
+      // Removed the non-existent 'license' parameter
+      await device.connect(
+        autoConnect: false,
+        timeout: const Duration(seconds: 15),
+      );
 
-    if (!mounted) return;
-    setState(() {
-      targetDevice = device;
-      isConnected = true;
-      isScanning = false;
-    });
+      if (!mounted) return;
+      setState(() {
+        targetDevice = device;
+        isConnected = true;
+        isScanning = false;
+      });
 
-    discoverServices(device);
+      discoverServices(device);
+    } catch (e) {
+      print("Failed to connect: $e");
+    }
   }
-
   Future<void> discoverServices(BluetoothDevice device) async {
     List<BluetoothService> services = await device.discoverServices();
     for (var service in services) {
